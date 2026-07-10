@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ASTULA Geo-Fence Check-In</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 20px; text-align: center; background: #f5f5f5; }
+    h2 { color: #2c3e50; }
+    button { padding: 14px 28px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer; margin: 8px; }
+    #checkin-btn  { background: #27ae60; color: white; }
+    #checkout-btn { background: #2980b9; color: white; }
+    #status { margin-top: 20px; font-size: 14px; color: #555; min-height: 60px; }
+    select, input { width: 100%; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #ccc; font-size: 14px; }
+    label { display: block; text-align: left; font-weight: bold; margin-top: 10px; }
+    #loading { color: #888; font-style: italic; }
+  </style>
+</head>
+<body>
+  <h2>ASTULA Attendance</h2>
+
+  <label>Your Name</label>
+  <input id="empName" type="text" placeholder="Enter your full name" />
+
+  <label>Select Location</label>
+  <select id="locationSelect">
+    <option value="">Loading locations...</option>
+  </select>
+
+  <button id="checkin-btn" onclick="markAttendance('checkin')">Check In</button>
+  <button id="checkout-btn" onclick="markAttendance('checkout')">Check Out</button>
+
+  <div id="status">Loading office locations from Coda...</div>
+
+  <script>
+    // ─── CONFIGURATION ───────────────────────────────────────────────────────
+    var CODA_API_TOKEN     = "YOUR_CODA_API_TOKEN_HERE";
+    var DOC_ID             = "Atr3PPmQS1";
+    var LOCATIONS_TABLE_ID = "grid-WLp_T1jS0I";
+    var ATTENDANCE_TABLE_ID = "grid-gZai0QAQEo";
+
+    // Attendance Log column IDs
+    var COL_EMPLOYEE   = "c-J8EKnis8_A";
+    var COL_DATE       = "c-ACo2jolnFc";
+    var COL_LOCATION   = "c-h5rsJ4Rlh8";
+    var COL_CHECKIN    = "c-AxPl7bJ200";
+    var COL_CHECKOUT   = "c-J4gTVyX_IM";
+    var COL_STATUS     = "c-JyXxsE2XrF";
+    // ─────────────────────────────────────────────────────────────────────────
+
+    var locations = [];
+
+    function toRad(deg) { return deg * Math.PI / 180; }
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      var R = 6371000;
+      var dLat = toRad(lat2 - lat1);
+      var dLon = toRad(lon2 - lon1);
+      var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+              Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*
+              Math.sin(dLon/2)*Math.sin(dLon/2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function codaHeaders() {
+      return { "Authorization": "Bearer " + CODA_API_TOKEN, "Content-Type": "application/json" };
+    }
+
+    // Load locations dynamically from the Office Locations table in Coda
+    function loadLocations() {
+      var url = "https://coda.io/apis/v1/docs/" + DOC_ID + "/tables/" + LOCATIONS_TABLE_ID + "/rows?useColumnNames=true&limit=50";
+      fetch(url, { headers: codaHeaders() })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          locations = [];
+          var select = document.getElementById("locationSelect");
+          select.innerHTML = '<option value="">-- Select your site --</option>';
+          if (data.items) {
+            data.items.forEach(function(row) {
+              var vals = row.values;
+              var name = vals["Location Name"] || "";
+              var lat  = parseFloat(vals["Latitude"]  || 0);
+              var lon  = parseFloat(vals["Longitude"] || 0);
+              var rad  = parseFloat(vals["Radius (m)"] || 15);
+              if (name && lat && lon) {
+                locations.push({ name: name, lat: lat, lon: lon, radius: rad });
+                var opt = document.createElement("option");
+                opt.value = locations.length - 1;
+                opt.textContent = name + " (radius: " + rad + "m)";
+                select.appendChild(opt);
+              }
+            });
+          }
+          document.getElementById("status").textContent = locations.length + " location(s) loaded. Select your site and check in.";
+        })
+        .catch(function(err) {
+          document.getElementById("status").textContent = "Could not load locations: " + err.message;
+        });
+    }
+
+    function markAttendance(type) {
+      var name    = document.getElementById("empName").value.trim();
+      var locIdx  = document.getElementById("locationSelect").value;
+      var status  = document.getElementById("status");
+
+      if (!name)   { status.textContent = "Please enter your name."; return; }
+      if (locIdx === "") { status.textContent = "Please select a location."; return; }
+
+      var loc = locations[parseInt(locIdx)];
+      status.textContent = "Getting your GPS location...";
+
+      navigator.geolocation.getCurrentPosition(
+        function(pos) {
+          var dist = haversine(pos.coords.latitude, pos.coords.longitude, loc.lat, loc.lon);
+          if (dist > loc.radius) {
+            status.textContent = "You are " + Math.round(dist) + "m away from " + loc.name +
+              ". Must be within " + loc.radius + "m to check in.";
+            return;
+          }
+          var now     = new Date();
+          var isoNow  = now.toISOString();
+          var today   = isoNow.split("T")[0];
+          var timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+          var cells = [
+            { column: COL_EMPLOYEE, value: name },
+            { column: COL_DATE,     value: today },
+            { column: COL_LOCATION, value: loc.name },
+            { column: COL_STATUS,   value: type === "checkin" ? "Checked In" : "Checked Out" }
+          ];
+          if (type === "checkin") {
+            cells.push({ column: COL_CHECKIN,  value: isoNow });
+          } else {
+            cells.push({ column: COL_CHECKOUT, value: isoNow });
+          }
+
+          var apiUrl = "https://coda.io/apis/v1/docs/" + DOC_ID + "/tables/" + ATTENDANCE_TABLE_ID + "/rows";
+          fetch(apiUrl, {
+            method: "POST",
+            headers: codaHeaders(),
+            body: JSON.stringify({ rows: [{ cells: cells }] })
+          })
+          .then(function(r) { return r.json(); })
+          .then(function() {
+            status.textContent = (type === "checkin" ? "CHECK-IN" : "CHECK-OUT") +
+              " recorded at " + timeStr + " — " + loc.name +
+              " (" + Math.round(dist) + "m from centre). Have a great day!";
+          })
+          .catch(function(err) {
+            status.textContent = "Location verified but could not save to Coda: " + err.message;
+          });
+        },
+        function(err) {
+          status.textContent = "Location error: " + err.message + ". Please enable GPS and try again.";
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    }
+
+    // Load locations on page load
+    loadLocations();
+  </script>
+</body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ASTULA Geo-Fence Check-In</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 480px; margin: 40px auto; padding: 20px; text-align: center; background: #f5f5f5; }
+    h2 { color: #2c3e50; }
+    button { padding: 14px 28px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer; margin: 8px; }
+    #checkin-btn  { background: #27ae60; color: white; }
+    #checkout-btn { background: #2980b9; color: white; }
+    #status { margin-top: 20px; font-size: 14px; color: #555; min-height: 60px; }
+    select, input { width: 100%; padding: 10px; margin: 8px 0; border-radius: 6px; border: 1px solid #ccc; font-size: 14px; }
+    label { display: block; text-align: left; font-weight: bold; margin-top: 10px; }
+    #loading { color: #888; font-style: italic; }
+  </style>
+</head>
+<body>
+  <h2>ASTULA Attendance</h2>
+
+  <label>Your Name</label>
+  <input id="empName" type="text" placeholder="Enter your full name" />
+
+  <label>Select Location</label>
+  <select id="locationSelect">
+    <option value="">Loading locations...</option>
+  </select>
+
+  <button id="checkin-btn" onclick="markAttendance('checkin')">Check In</button>
+  <button id="checkout-btn" onclick="markAttendance('checkout')">Check Out</button>
+
+  <div id="status">Loading office locations from Coda...</div>
+
+  <script>
+    // ─── CONFIGURATION ───────────────────────────────────────────────────────
+    var CODA_API_TOKEN     = "YOUR_CODA_API_TOKEN_HERE";
+    var DOC_ID             = "Atr3PPmQS1";
+    var LOCATIONS_TABLE_ID = "grid-WLp_T1jS0I";
+    var ATTENDANCE_TABLE_ID = "grid-gZai0QAQEo";
+
+    // Attendance Log column IDs
+    var COL_EMPLOYEE   = "c-J8EKnis8_A";
+    var COL_DATE       = "c-ACo2jolnFc";
+    var COL_LOCATION   = "c-h5rsJ4Rlh8";
+    var COL_CHECKIN    = "c-AxPl7bJ200";
+    var COL_CHECKOUT   = "c-J4gTVyX_IM";
+    var COL_STATUS     = "c-JyXxsE2XrF";
+    // ─────────────────────────────────────────────────────────────────────────
+
+    var locations = [];
+
+    function toRad(deg) { return deg * Math.PI / 180; }
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      var R = 6371000;
+      var dLat = toRad(lat2 - lat1);
+      var dLon = toRad(lon2 - lon1);
+      var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+              Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*
+              Math.sin(dLon/2)*Math.sin(dLon/2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function codaHeaders() {
+      return { "Authorization": "Bearer " + CODA_API_TOKEN, "Content-Type": "application/json" };
+    }
+
+    // Load locations dynamically from the Office Locations table in Coda
+    function loadLocations() {
+      var url = "https://coda.io/apis/v1/docs/" + DOC_ID + "/tables/" + LOCATIONS_TABLE_ID + "/rows?useColumnNames=true&limit=50";
+      fetch(url, { headers: codaHeaders() })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          locations = [];
+          var select = document.getElementById("locationSelect");
+          select.innerHTML = '<option value="">-- Select your site --</option>';
+          if (data.items) {
+            data.items.forEach(function(row) {
+              var vals = row.values;
+              var name = vals["Location Name"] || "";
+              var lat  = parseFloat(vals["Latitude"]  || 0);
+              var lon  = parseFloat(vals["Longitude"] || 0);
+              var rad  = parseFloat(vals["Radius (m)"] || 15);
+              if (name && lat && lon) {
+                locations.push({ name: name, lat: lat, lon: lon, radius: rad });
+                var opt = document.createElement("option");
+                opt.value = locations.length - 1;
+                opt.textContent = name + " (radius: " + rad + "m)";
+                select.appendChild(opt);
+              }
+            });
+          }
+          document.getElementById("status").textContent = locations.length + " location(s) loaded. Select your site and check in.";
+        })
+        .catch(function(err) {
+          document.getElementById("status").textContent = "Could not load locations: " + err.message;
+        });
+    }
+
+    function markAttendance(type) {
+      var name    = document.getElementById("empName").value.trim();
+      var locIdx  = document.getElementById("locationSelect").value;
+      var status  = document.getElementById("status");
+
+      if (!name)   { status.textContent = "Please enter your name."; return; }
+      if (locIdx === "") { status.textContent = "Please select a location."; return; }
+
+      var loc = locations[parseInt(locIdx)];
+      status.textContent = "Getting your GPS location...";
+
+      navigator.geolocation.getCurrentPosition(
+        function(pos) {
+          var dist = haversine(pos.coords.latitude, pos.coords.longitude, loc.lat, loc.lon);
+          if (dist > loc.radius) {
+            status.textContent = "You are " + Math.round(dist) + "m away from " + loc.name +
+              ". Must be within " + loc.radius + "m to check in.";
+            return;
+          }
+          var now     = new Date();
+          var isoNow  = now.toISOString();
+          var today   = isoNow.split("T")[0];
+          var timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+          var cells = [
+            { column: COL_EMPLOYEE, value: name },
+            { column: COL_DATE,     value: today },
+            { column: COL_LOCATION, value: loc.name },
+            { column: COL_STATUS,   value: type === "checkin" ? "Checked In" : "Checked Out" }
+          ];
+          if (type === "checkin") {
+            cells.push({ column: COL_CHECKIN,  value: isoNow });
+          } else {
+            cells.push({ column: COL_CHECKOUT, value: isoNow });
+          }
+
+          var apiUrl = "https://coda.io/apis/v1/docs/" + DOC_ID + "/tables/" + ATTENDANCE_TABLE_ID + "/rows";
+          fetch(apiUrl, {
+            method: "POST",
+            headers: codaHeaders(),
+            body: JSON.stringify({ rows: [{ cells: cells }] })
+          })
+          .then(function(r) { return r.json(); })
+          .then(function() {
+            status.textContent = (type === "checkin" ? "CHECK-IN" : "CHECK-OUT") +
+              " recorded at " + timeStr + " — " + loc.name +
+              " (" + Math.round(dist) + "m from centre). Have a great day!";
+          })
+          .catch(function(err) {
+            status.textContent = "Location verified but could not save to Coda: " + err.message;
+          });
+        },
+        function(err) {
+          status.textContent = "Location error: " + err.message + ". Please enable GPS and try again.";
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    }
+
+    // Load locations on page load
+    loadLocations();
+  </script>
+</body>
+</html>
